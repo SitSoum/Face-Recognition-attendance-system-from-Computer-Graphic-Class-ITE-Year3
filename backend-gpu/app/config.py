@@ -1,0 +1,9 @@
+# app/config.py
+
+DB_FILE = "../database/face_db.npy"
+
+CONF_THRESHOLD = 0.3
+SIMILARITY_THRESHOLD = 0.65
+EXPAND_RATIO = 0.25
+IOU_THRESHOLD = 0.4
+MAX_MISSING = 5

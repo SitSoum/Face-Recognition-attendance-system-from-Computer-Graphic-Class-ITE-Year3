@@ -1,0 +1,221 @@
+#app/services/live_recognition.py
+import cv2
+from app.services.face_database import (
+    detector,
+    face_db,
+    recognize_face_from_crop,
+    EXPAND_RATIO,
+    CONF_THRESHOLD
+)
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+executor = ThreadPoolExecutor(max_workers=2)
+
+
+def compute_iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    interArea = max(0, xB-xA) * max(0, yB-yA)
+    boxAArea = (boxA[2]-boxA[0])*(boxA[3]-boxA[1])
+    boxBArea = (boxB[2]-boxB[0])*(boxB[3]-boxB[1])
+    return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+
+def expand_bbox(x1,y1,x2,y2,w,h,ratio=EXPAND_RATIO):
+    bw = x2-x1
+    bh = y2-y1
+    return (
+        max(0,int(x1-bw*ratio)),
+        max(0,int(y1-bh*ratio)),
+        min(w,int(x2+bw*ratio)),
+        min(h,int(y2+bh*ratio))
+    )
+
+
+# predict for every frame
+# def get_video_stream():
+#     cap = cv2.VideoCapture(0)
+#     tracked_faces = {}
+#     next_track_id = 0
+#     frame_count = 0
+#     MAX_MISSING = 5
+#     IOU_THRESHOLD = 0.4
+
+#     while True:
+#         ret, frame = cap.read()
+#         if not ret:
+#             break
+#         frame_count += 1
+#         h_frame, w_frame = frame.shape[:2]
+#         results = detector(frame, conf=CONF_THRESHOLD, verbose=False)
+#         detections = []
+#         if len(results)>0 and len(results[0].boxes.xyxy)>0:
+#             detections = [tuple(map(int, box)) for box in results[0].boxes.xyxy]
+#         for det in detections:
+#             x1, y1, x2, y2 = det
+#             x1n,y1n,x2n,y2n = expand_bbox(x1,y1,x2,y2,w_frame,h_frame)
+#             matched_id = None
+#             for track_id,data in tracked_faces.items():
+#                 if compute_iou(data["bbox"], (x1n,y1n,x2n,y2n))>IOU_THRESHOLD:
+#                     matched_id = track_id
+#                     break
+#             face_crop = frame[y1n:y2n, x1n:x2n]
+#             person_id, score = recognize_face_from_crop(face_crop, face_db)
+#             if matched_id is None:
+#                 tracked_faces[next_track_id] = {"bbox":(x1n,y1n,x2n,y2n), "name":person_id, "score":score, "last_seen":frame_count}
+#                 next_track_id+=1
+#             else:
+#                 tracked_faces[matched_id]["bbox"]=(x1n,y1n,x2n,y2n)
+#                 tracked_faces[matched_id]["name"]=person_id
+#                 tracked_faces[matched_id]["score"]=score
+#                 tracked_faces[matched_id]["last_seen"]=frame_count
+#         tracked_faces = {tid:data for tid,data in tracked_faces.items() if frame_count-data["last_seen"]<=MAX_MISSING}
+#         # STREAM FRAME
+#         for track_id,data in tracked_faces.items():
+#             x1,y1,x2,y2 = data["bbox"]
+#             label = f"ID:{track_id} | {data['name'] if data['name'] else 'Unknown'}"
+#             color = (0,255,0) if data["name"] else (0,0,255)
+#             cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
+#             cv2.putText(frame,label,(x1,y1-10),cv2.FONT_HERSHEY_SIMPLEX,0.5,color,2)
+#         # Encode to JPEG
+#         ret,jpeg=cv2.imencode(".jpg",frame)
+#         if not ret:
+#             continue
+#         frame_bytes=jpeg.tobytes()
+#         yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"+frame_bytes+b"\r\n")
+
+
+# ----------------------------
+# ASYNC RECOGNITION
+# ----------------------------
+def async_recognize(face_crop):
+    return recognize_face_from_crop(face_crop, face_db)
+
+
+# ----------------------------
+# STREAM FUNCTION
+# ----------------------------
+def get_video_stream():
+    cap = cv2.VideoCapture(0)
+
+    tracked_faces = {}
+    next_track_id = 0
+    frame_count = 0
+
+    MAX_MISSING = 5
+    IOU_THRESHOLD = 0.4
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_count += 1
+        h_frame, w_frame = frame.shape[:2]
+
+        # ----------------------------
+        # DETECTION
+        # ----------------------------
+        results = detector(frame, conf=CONF_THRESHOLD, verbose=False)
+
+        detections = []
+        if len(results) > 0 and len(results[0].boxes.xyxy) > 0:
+            detections = [tuple(map(int, box)) for box in results[0].boxes.xyxy]
+
+        # ----------------------------
+        # PROCESS EACH DETECTION
+        # ----------------------------
+        for det in detections:
+            x1, y1, x2, y2 = det
+            x1n, y1n, x2n, y2n = expand_bbox(x1, y1, x2, y2, w_frame, h_frame)
+            expanded_box = (x1n, y1n, x2n, y2n)
+
+            matched_id = None
+
+            # ----------------------------
+            # MATCH WITH EXISTING TRACKS
+            # ----------------------------
+            for track_id, data in tracked_faces.items():
+                iou = compute_iou(expanded_box, data["bbox"])
+                if iou > IOU_THRESHOLD:
+                    matched_id = track_id
+                    break
+
+            # ----------------------------
+            # EXISTING TRACK
+            # ----------------------------
+            if matched_id is not None:
+                tracked_faces[matched_id]["bbox"] = expanded_box
+                tracked_faces[matched_id]["last_seen"] = frame_count
+
+                # 🔥 Only run recognition if still unknown
+                if tracked_faces[matched_id]["name"] is None:
+                    face_crop = frame[y1n:y2n, x1n:x2n]
+
+                    person_id, score = recognize_face_from_crop(face_crop, face_db)
+
+                    if person_id is not None:
+                        tracked_faces[matched_id]["name"] = person_id
+                        tracked_faces[matched_id]["score"] = score
+
+            # ----------------------------
+            # NEW TRACK
+            # ----------------------------
+            else:
+                face_crop = frame[y1n:y2n, x1n:x2n]
+
+                person_id, score = recognize_face_from_crop(face_crop, face_db)
+
+                tracked_faces[next_track_id] = {
+                    "bbox": expanded_box,
+                    "name": person_id,
+                    "score": score,
+                    "last_seen": frame_count
+                }
+
+                next_track_id += 1
+
+        # ----------------------------
+        # REMOVE LOST TRACKS
+        # ----------------------------
+        tracked_faces = {
+            tid: data for tid, data in tracked_faces.items()
+            if frame_count - data["last_seen"] <= MAX_MISSING
+        }
+
+        # ----------------------------
+        # DRAW RESULTS
+        # ----------------------------
+        for track_id, data in tracked_faces.items():
+            x1, y1, x2, y2 = data["bbox"]
+
+            name = data["name"] if data["name"] else "Unknown"
+            label = f"ID:{track_id} | {name}"
+
+            if data["name"]:
+                label += f" | S:{data['score']:.2f}"
+
+            color = (0, 255, 0) if data["name"] else (0, 0, 255)
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+        # ----------------------------
+        # ENCODE FRAME FOR STREAMING
+        # ----------------------------
+        ret, jpeg = cv2.imencode(".jpg", frame)
+        if not ret:
+            continue
+
+        frame_bytes = jpeg.tobytes()
+
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" +
+            frame_bytes +
+            b"\r\n"
+        )
+
+    cap.release()

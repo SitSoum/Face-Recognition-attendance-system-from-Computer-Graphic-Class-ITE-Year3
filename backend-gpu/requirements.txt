@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+numpy
+opencv-python
+ultralytics
+insightface
+onnxruntime-gpu
+python-multipart
+requests
+pydantic
