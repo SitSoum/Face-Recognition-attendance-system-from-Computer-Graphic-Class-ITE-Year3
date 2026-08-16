@@ -1,18 +1,17 @@
 # YOLO + ArcFace Face Recognition Attendance System
 
-A face recognition attendance system that uses **YOLO** for face detection and **ArcFace** for face recognition.
+A face recognition attendance system that uses **YOLO-face** for face detection and **ArcFace** for face recognition.
 
 The project consists of a Python backend and a React frontend, with Supabase used for data storage and other backend services.
 
 ## Features
 
-* Face detection using YOLO
+* Face detection using YOLO-face
 * Face recognition using ArcFace
 * Attendance management
 * Python backend API
 * React frontend
 * Supabase integration
-* CPU and GPU backend versions
 
 ## Project Structure
 
